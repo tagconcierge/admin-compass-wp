@@ -21,14 +21,17 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 class admin_compass {
     public $db;
     public $db_file;
+    public $db_name;
 
     public function __construct() {
-        $this->db_file = WP_CONTENT_DIR . '/admin-compass.db';
+        $this->init_db_name();
+        $this->db_file = $this->get_db_path();
         $this->init_db();
 
         add_action('admin_bar_menu', array($this, 'add_search_icon'), 999);
         add_action('admin_footer', array($this, 'add_search_modal'));
         add_action('wp_footer', array($this, 'add_search_modal'));
+        add_action('admin_init', array($this, 'check_db_security'));
 
         add_action('admin_enqueue_scripts', array($this, 'enqueue_scripts'));
         add_action('wp_enqueue_scripts', array($this, 'enqueue_scripts'));
@@ -51,8 +54,38 @@ class admin_compass {
         register_deactivation_hook(__FILE__, array($this, 'deactivate'));
     }
 
+    private function init_db_name() {
+        $this->db_name = get_option('admin_compass_db_name');
+        if (!$this->db_name) {
+            $this->db_name = $this->generate_db_name();
+            update_option('admin_compass_db_name', $this->db_name);
+        }
+    }
+
+    private function generate_db_name() {
+        $random_string = bin2hex(random_bytes(16)); // 32 character random string
+        return 'admin_compass_' . $random_string . '.db';
+    }
+
+    private function get_db_path() {
+        // Store the database one level above the WordPress root
+        return WP_CONTENT_DIR . '/' . $this->db_name;
+    }
+
     public function activate() {
+        // Check if we need to rename an existing database
+        $old_db_file = ABSPATH . '../admin-compass.db';
+        if (file_exists($old_db_file) && !file_exists($this->db_file)) {
+            rename($old_db_file, $this->db_file);
+        }
+
+        // Ensure the database file has the correct permissions
+        if (file_exists($this->db_file)) {
+            chmod($this->db_file, 0600);
+        }
+
         $this->create_tables();
+
         set_transient( 'admin_compass_reindex_admin_menu', true);
         $this->rebuild_index();
     }
@@ -68,6 +101,7 @@ class admin_compass {
             });
             return;
         }
+
         $this->db = new SQLite3($this->db_file);
         $this->db->exec('PRAGMA journal_mode = WAL;');
     }
@@ -312,6 +346,26 @@ class admin_compass {
          *                        are encoded.
          */
         return apply_filters( 'get_edit_post_link', $link, $post->ID, $context );
+    }
+
+    public function check_db_security() {
+        // Check if the file is in a secure location
+        if (strpos($this->db_file, WP_CONTENT_DIR) !== false) {
+            add_action('admin_notices', function() {
+                echo '<div class="error"><p>Admin Compass: The database file is in a potentially insecure location. Please move it outside the web root.</p></div>';
+            });
+        }
+
+        // Check file permissions
+        if (file_exists($this->db_file)) {
+            $perms = fileperms($this->db_file);
+            if (($perms & 0777) !== 0600) {
+                chmod($this->db_file, 0600);
+                add_action('admin_notices', function() {
+                    echo '<div class="warning"><p>Admin Compass: The database file permissions have been corrected to 0600.</p></div>';
+                });
+            }
+        }
     }
 }
 
