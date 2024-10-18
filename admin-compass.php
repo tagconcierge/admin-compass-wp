@@ -16,6 +16,7 @@ if (!defined('ABSPATH')) exit; // Exit if accessed directly
 
 if ( defined( 'WP_CLI' ) && WP_CLI ) {
     require_once plugin_dir_path( __FILE__ ) . 'admin-compass-load-test.php';
+    require_once plugin_dir_path(__FILE__) . 'admin-compass-demo-setup.php';
 }
 
 class admin_compass {
@@ -196,7 +197,7 @@ class admin_compass {
 
         $wp_admin_bar->add_node(array(
             'id'    => 'admin-compass',
-            'title' => '<span class="ab-icon dashicons dashicons-admin-site"></span>',
+            'title' => '<span class="ab-icon dashicons dashicons-search"></span>',
             'href'  => '#',
             'meta'  => array(
                 'title' => 'Admin Compass Search (Ctrl + Shift + F)',
@@ -349,13 +350,6 @@ class admin_compass {
     }
 
     public function check_db_security() {
-        // Check if the file is in a secure location
-        if (strpos($this->db_file, WP_CONTENT_DIR) !== false) {
-            add_action('admin_notices', function() {
-                echo '<div class="error"><p>Admin Compass: The database file is in a potentially insecure location. Please move it outside the web root.</p></div>';
-            });
-        }
-
         // Check file permissions
         if (file_exists($this->db_file)) {
             $perms = fileperms($this->db_file);
