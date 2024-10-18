@@ -1,6 +1,6 @@
 === Admin Compass ===
-Contributors: Tag Concierge
-Tags: admin, search, navigation, productivity, global search, wp-admin, utlity
+Contributors: tagconcierge
+Tags: admin, search, navigation, productivity, global search
 Requires at least: 5.1.0
 Tested up to: 6.6.2
 Requires PHP: 7.0
@@ -73,6 +73,4 @@ While the plugin should work on individual sites within a multisite installation
 == Screenshots ==
 
 1. Admin Compass search palette in action
-2. Search results showing various content types
-3. Admin bar with Admin Compass icon
 
