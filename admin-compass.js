@@ -138,33 +138,24 @@ jQuery(document).ready(function($) {
         }
 
         items.forEach(function(item, index) {
-            var icon = getItemIcon(item.type);
-            $results.append(
-                $("<div class='result-item'>")
-                    .append($("<span class='result-icon'>" + icon + "</span>"))
-                    .append($("<span class='result-title'>" + item.title + "</span>"))
-                    .append($("<span class='result-type'>" + item.type + "</span>"))
-                    .on("click", function() {
-                        window.location.href = item.edit_url;
-                    })
-                    .on("mouseover", function() {
-                        currentFocus = index;
-                        addActive($results.find(".result-item"));
-                    })
-            );
-        });
-    }
+             var resultItem = $("<div class='result-item'>")
+                .append($("<span class='result-title'>" + item.title + "</span>"))
+                .append($("<span class='result-type'>" + item.type + "</span>"));
 
-    function getItemIcon(type) {
-        var icons = {
-            "post": "📄",
-            "page": "📑",
-            "product": "🛍️",
-            "order": "📦",
-            "admin_page": "⚙️",
-            "default": "🔍"
-        };
-        return icons[type] || icons["default"];
+            if (false &&/ item.thumbnail_url) {
+                var thumbnailUrl = item.thumbnail_url || '/wp-includes/images/media/default.png';
+                resultItem.prepend($("<img class='result-thumbnail' src='" + thumbnailUrl + "' alt=''>"));
+            }
+
+            resultItem.on("click", function() {
+                window.location.href = item.edit_url;
+            }).on("mouseover", function() {
+                currentFocus = index;
+                addActive($results.find(".result-item"));
+            });
+
+            $results.append(resultItem);
+        });
     }
 });
 jQuery(document).ready(function($) {

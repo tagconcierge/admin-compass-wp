@@ -10,6 +10,15 @@ if (!defined('WP_CLI') || !WP_CLI) {
  */
 class Admin_Compass_Demo_Setup {
 
+    private function get_unsplash_image($query = 'nature', $width = 800, $height = 600) {
+        $url = "https://source.unsplash.com/random/{$width}x{$height}/?{$query}";
+        $response = wp_remote_get($url);
+        if (is_wp_error($response)) {
+            return false;
+        }
+        return wp_remote_retrieve_header($response, 'location');
+    }
+
     /**
      * Cleans existing content and sets up a demo environment for Admin Compass.
      *
@@ -37,6 +46,7 @@ class Admin_Compass_Demo_Setup {
     public function setup_demo($args, $assoc_args) {
         $post_count = $assoc_args['posts'] ?? 10;
         $page_count = $assoc_args['pages'] ?? 5;
+        $media_count = $assoc_args['media'] ?? 20;
 
         WP_CLI::log('Starting demo environment setup for Admin Compass...');
 
@@ -48,6 +58,9 @@ class Admin_Compass_Demo_Setup {
 
         // Create demo pages
         $this->create_demo_pages($page_count);
+
+        // Create demo media
+        $this->create_demo_media($media_count);
 
         // Update options for demo
         $this->update_options();
@@ -98,6 +111,17 @@ class Admin_Compass_Demo_Setup {
             $title = $post_titles[$i % count($post_titles)];
             $content = "This is a demo post about $title. It demonstrates the search functionality of the Admin Compass plugin.";
 
+            // Fetch an image from Unsplash
+            $image_url = $this->get_unsplash_image('technology', 800, 600);
+
+            if ($image_url) {
+                // Download the image and add it to the media library
+                $upload = media_sideload_image($image_url, 0, $title, 'id');
+                if (!is_wp_error($upload)) {
+                    $content .= "\n\n" . wp_get_attachment_image($upload, 'large');
+                }
+            }
+
             $post_id = wp_insert_post([
                 'post_title'    => $title,
                 'post_content'  => $content,
@@ -109,6 +133,9 @@ class Admin_Compass_Demo_Setup {
             if (is_wp_error($post_id)) {
                 WP_CLI::warning("Failed to create post: $title");
             } else {
+                if ($upload && !is_wp_error($upload)) {
+                    set_post_thumbnail($post_id, $upload);
+                }
                 WP_CLI::log("Created post: $title");
             }
         }
@@ -131,6 +158,17 @@ class Admin_Compass_Demo_Setup {
             $title = $page_titles[$i % count($page_titles)];
             $content = "This is a demo page about $title. It showcases the Admin Compass plugin's ability to search pages.";
 
+            // Fetch an image from Unsplash
+            $image_url = $this->get_unsplash_image('office', 1200, 800);
+
+            if ($image_url) {
+                // Download the image and add it to the media library
+                $upload = media_sideload_image($image_url, 0, $title, 'id');
+                if (!is_wp_error($upload)) {
+                    $content .= "\n\n" . wp_get_attachment_image($upload, 'large');
+                }
+            }
+
             $page_id = wp_insert_post([
                 'post_title'    => $title,
                 'post_content'  => $content,
@@ -142,7 +180,35 @@ class Admin_Compass_Demo_Setup {
             if (is_wp_error($page_id)) {
                 WP_CLI::warning("Failed to create page: $title");
             } else {
+                if ($upload && !is_wp_error($upload)) {
+                    set_post_thumbnail($page_id, $upload);
+                }
                 WP_CLI::log("Created page: $title");
+            }
+        }
+    }
+
+    private function create_demo_media($count) {
+        WP_CLI::log("Creating $count demo media items...");
+
+        $queries = ['technology', 'nature', 'business', 'food', 'travel'];
+
+        for ($i = 0; $i < $count; $i++) {
+            $query = $queries[$i % count($queries)];
+            $title = ucfirst($query) . " Image " . ($i + 1);
+
+            $image_url = $this->get_unsplash_image($query, 1200, 800);
+
+            if ($image_url) {
+                $upload = media_sideload_image($image_url, 0, $title, 'id');
+                if (!is_wp_error($upload)) {
+                    $attachment_url = wp_get_attachment_url($upload);
+                    WP_CLI::log("Created media item: $title ($attachment_url)");
+                } else {
+                    WP_CLI::warning("Failed to create media item: $title");
+                }
+            } else {
+                WP_CLI::warning("Failed to fetch image for: $title");
             }
         }
     }

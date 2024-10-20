@@ -4,7 +4,7 @@ Tags: admin, search, navigation, productivity, global search
 Requires at least: 5.1.0
 Tested up to: 6.6.2
 Requires PHP: 7.0
-Stable tag: 1.0.0
+Stable tag: 1.1.0
 License: GPLv2 or later
 License URI: http://www.gnu.org/licenses/gpl-2.0.html
 
@@ -66,6 +66,9 @@ The search index is stored in a SQLite database with a randomized filename, loca
 While the plugin should work on individual sites within a multisite installation, it has not been extensively tested in a multisite environment. Use with caution and test thoroughly.
 
 == Changelog ==
+
+= 1.1.0 =
+* Protect search index from public access
 
 = 1.0.0 =
 * Initial release

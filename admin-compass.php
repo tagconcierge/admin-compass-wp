@@ -1,9 +1,9 @@
 <?php
 /**
  * Plugin Name: Admin Compass
- * Plugin URI: https://wordpress.com/plugins/admin-compass
+ * Plugin URI: https://wordpress.org/plugins/admin-compass/
  * Description: Global search for WP-Admin. The fastest way to navigate your backend.
- * Version: 1.0.0
+ * Version: 1.1.0
  * Author: Tag Concierge
  * Author URI: https://tagconcierge.com
  * Requires PHP: 7.4
@@ -73,7 +73,23 @@ class admin_compass {
         return WP_CONTENT_DIR . '/' . $this->db_name;
     }
 
+    private function remove_db_file() {
+        if (file_exists($this->db_file)) {
+            // Close the database connection if it's open
+            if ($this->db) {
+                $this->db->close();
+            }
+
+            // Delete the file
+            unlink($this->db_file);
+        }
+
+        // Remove the database name from options
+        delete_option('admin_compass_db_name');
+    }
+
     public function activate() {
+
         // Check if we need to rename an existing database
         $old_db_file = ABSPATH . '../admin-compass.db';
         if (file_exists($old_db_file) && !file_exists($this->db_file)) {
@@ -93,6 +109,7 @@ class admin_compass {
 
     public function deactivate() {
         wp_clear_scheduled_hook('admin_compass_rebuild_index');
+        $this->remove_db_file();
     }
 
     private function init_db() {
@@ -113,6 +130,7 @@ class admin_compass {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 item_id INTEGER,
                 item_type TEXT,
+                thumbnail_url TEXT,
                 title TEXT,
                 content TEXT,
                 edit_url TEXT
@@ -126,10 +144,21 @@ class admin_compass {
         $this->db->exec("DELETE FROM search_index WHERE item_type != 'admin_page'");
 
         // Index posts and pages
-        $posts = get_posts(array('post_type' => array('post', 'page'), 'posts_per_page' => 300));
+        $posts = get_posts(array(
+            'post_type' => array('post', 'page', 'attachment'),
+            'posts_per_page' => 300,
+            'post_status' => null,
+            'post_parent' => null,
+        ));
 
         foreach ($posts as $post) {
-            $this->add_to_index($post->ID, $post->post_type, $post->post_title, $post->post_content, $this->get_edit_post_link($post, 'raw'));
+
+            $content = $post->post_content;
+            if ($post->post_type === 'attachment') {
+                $content .= ' ' . $post->post_title . ' ' . $post->post_name . ' ' . get_post_meta($post->ID, '_wp_attachment_image_alt', true);
+            }
+
+            $this->add_to_index($post->ID, $post->post_type, $post->post_title, $content, $this->get_edit_post_link($post, 'raw'), get_the_post_thumbnail_url($post));
         }
     }
 
@@ -150,7 +179,7 @@ class admin_compass {
             $menu_url = $menu_item[2];
 
             // Index main menu item
-            $this->add_to_index(0, 'admin_page', $menu_title, "Navigate to $menu_title admin page", admin_url($menu_url));
+            $this->add_to_index(0, 'admin_page', $menu_title, "Navigate to $menu_title admin page", admin_url($menu_url), null);
 
             // Index submenu items
             if (isset($submenu[$menu_url])) {
@@ -163,25 +192,27 @@ class admin_compass {
                         $submenu_url = $menu_url . '?page=' . $submenu_url;
                     }
 
-                    $this->add_to_index(0, 'admin_page', "$menu_title - $submenu_title", "Navigate to $submenu_title under $menu_title", admin_url($submenu_url));
+                    $this->add_to_index(0, 'admin_page', "$menu_title - $submenu_title", "Navigate to $submenu_title under $menu_title", admin_url($submenu_url), null);
                 }
             }
         }
     }
 
-    private function add_to_index($item_id, $item_type, $title, $content, $edit_url) {
-        $stmt = $this->db->prepare("INSERT INTO search_index (item_id, item_type, title, content, edit_url) VALUES (:item_id, :item_type, :title, :content, :edit_url)");
+    private function add_to_index($item_id, $item_type, $title, $content, $edit_url, $thumbnail_url) {
+        $stmt = $this->db->prepare("INSERT INTO search_index (item_id, item_type, title, content, edit_url, thumbnail_url) VALUES (:item_id, :item_type, :title, :content, :edit_url, :thumbnail_url)");
         $stmt->bindValue(':item_id', $item_id, SQLITE3_INTEGER);
         $stmt->bindValue(':item_type', $item_type, SQLITE3_TEXT);
         $stmt->bindValue(':title', $title, SQLITE3_TEXT);
         $stmt->bindValue(':content', $content, SQLITE3_TEXT);
         $stmt->bindValue(':edit_url', $edit_url, SQLITE3_TEXT);
+        $stmt->bindValue(':thumbnail_url', $thumbnail_url, SQLITE3_TEXT);
+
         $stmt->execute();
     }
 
     public function update_index_on_save($post_id, $post, $update) {
         $this->remove_from_index($post_id);
-        $this->add_to_index($post_id, $post->post_type, $post->post_title, $post->post_content, $this->get_edit_post_link($post, 'raw'));
+        $this->add_to_index($post_id, $post->post_type, $post->post_title, $post->post_content, $this->get_edit_post_link($post, 'raw'), get_the_post_thumbnail_url($post));
     }
 
     public function remove_from_index($item_id) {
@@ -255,7 +286,7 @@ class admin_compass {
         $results = array();
 
         $search_query = $this->db->prepare("
-            SELECT item_id, item_type, title, edit_url
+            SELECT item_id, item_type, title, edit_url, thumbnail_url
             FROM search_index
             WHERE title LIKE :query OR content LIKE :query
             ORDER BY
@@ -274,6 +305,7 @@ class admin_compass {
                 'title' => $row['title'],
                 'type' => $row['item_type'],
                 'edit_url' => $row['edit_url'],
+                'thumbnail_url' => $row['thumbnail_url'],
             );
         }
 
@@ -359,6 +391,33 @@ class admin_compass {
                     echo '<div class="warning"><p>Admin Compass: The database file permissions have been corrected to 0600.</p></div>';
                 });
             }
+        }
+
+        $this->create_htaccess();
+
+        $this->check_db_accessibility();
+    }
+
+     private function create_htaccess() {
+        $htaccess_file = dirname($this->db_file) . '/.htaccess';
+        if (!file_exists($htaccess_file)) {
+            $htaccess_content = "<FilesMatch \"\\.(db)$\">
+    Order allow,deny
+    Deny from all
+</FilesMatch>
+";
+            file_put_contents($htaccess_file, $htaccess_content);
+        }
+    }
+
+    private function check_db_accessibility() {
+        $db_url = str_replace(ABSPATH, get_site_url() . '/', $this->db_file);
+        $response = wp_remote_head($db_url);
+
+        if (!is_wp_error($response) && $response['response']['code'] !== 403) {
+            add_action('admin_notices', function() {
+                echo '<div class="error"><p>Warning: Your Admin Compass database file may be publicly accessible. Please check your server configuration.</p></div>';
+            });
         }
     }
 }
