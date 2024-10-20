@@ -1,4 +1,5 @@
 jQuery(document).ready(function($) {
+     var $overlay = $("#admin-compass-overlay");
     var $modal = $("#admin-compass-modal");
     var $input = $("#admin-compass-input");
     var $results = $("#admin-compass-results");
@@ -24,15 +25,29 @@ jQuery(document).ready(function($) {
         }
     });
 
+    // Close modal when clicking outside
+    $overlay.on('click', function(e) {
+        if (e.target === this) {
+            closeModal();
+        }
+    });
+
+    // Prevent clicks inside the modal from closing it
+    $modal.on('click', function(e) {
+        e.stopPropagation();
+    });
+
     function toggleModal() {
-        $modal.toggle();
-        if ($modal.is(":visible")) {
+        $overlay.toggleClass('admin-compass-hidden');
+        $modal.toggleClass('admin-compass-hidden');
+        if (!$modal.hasClass('admin-compass-hidden')) {
             $input.focus();
         }
     }
 
     function closeModal() {
-        $modal.hide();
+        $overlay.addClass('admin-compass-hidden');
+        $modal.addClass('admin-compass-hidden');
         $input.val("");
         $results.empty();
         currentFocus = -1;
@@ -142,7 +157,7 @@ jQuery(document).ready(function($) {
                 .append($("<span class='result-title'>" + item.title + "</span>"))
                 .append($("<span class='result-type'>" + item.type + "</span>"));
 
-            if (false &&/ item.thumbnail_url) {
+            if (false && item.thumbnail_url) {
                 var thumbnailUrl = item.thumbnail_url || '/wp-includes/images/media/default.png';
                 resultItem.prepend($("<img class='result-thumbnail' src='" + thumbnailUrl + "' alt=''>"));
             }

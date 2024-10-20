@@ -3,7 +3,7 @@
  * Plugin Name: Admin Compass
  * Plugin URI: https://wordpress.org/plugins/admin-compass/
  * Description: Global search for WP-Admin. The fastest way to navigate your backend.
- * Version: 1.1.0
+ * Version: 1.2.0
  * Author: Tag Concierge
  * Author URI: https://tagconcierge.com
  * Requires PHP: 7.4
@@ -18,6 +18,8 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
     require_once plugin_dir_path( __FILE__ ) . 'admin-compass-load-test.php';
     require_once plugin_dir_path(__FILE__) . 'admin-compass-demo-setup.php';
 }
+
+define('ADMIN_COMPASS_VERSION', '1.1.1');
 
 class admin_compass {
     public $db;
@@ -74,26 +76,55 @@ class admin_compass {
     }
 
     private function remove_db_file() {
-        if (file_exists($this->db_file)) {
-            // Close the database connection if it's open
-            if ($this->db) {
-                $this->db->close();
-            }
+        if ($this->db) {
+            $this->db->close();
+            $this->db = null;
+        }
 
-            // Delete the file
+        if (file_exists($this->db_file)) {
             unlink($this->db_file);
+        }
+
+        if (file_exists($this->db_file . '-shm')) {
+            unlink($this->db_file . '-shm');
+        }
+        if (file_exists($this->db_file . '-wal')) {
+            unlink($this->db_file . '-wal');
         }
 
         // Remove the database name from options
         delete_option('admin_compass_db_name');
     }
 
-    public function activate() {
+    public function update() {
+        $current_version = get_option('admin_compass_version', '0.0.0');
 
-        // Check if we need to rename an existing database
-        $old_db_file = ABSPATH . '../admin-compass.db';
-        if (file_exists($old_db_file) && !file_exists($this->db_file)) {
-            rename($old_db_file, $this->db_file);
+        if ($current_version !== '0.0.0' && version_compare($current_version, ADMIN_COMPASS_VERSION, '<')) {
+            // Remove the existing database file
+            $this->remove_db_file();
+
+            // Recreate the database and rebuild the index
+            $this->init_db();
+            $this->create_tables();
+            $this->rebuild_index();
+            set_transient( 'admin_compass_reindex_admin_menu', true);
+
+            // Update the stored version number
+            update_option('admin_compass_version', ADMIN_COMPASS_VERSION);
+
+            // Add an admin notice about the update
+            add_action('admin_notices', function() {
+                echo '<div class="notice notice-success is-dismissible">';
+                echo '<p>Admin Compass has been updated to version ' . esc_html(ADMIN_COMPASS_VERSION) . '. The search index has been rebuilt.</p>';
+                echo '</div>';
+            });
+        }
+    }
+
+    public function activate() {
+        $old_db_file = WP_CONTENT_DIR . '/admin-compass.db';
+        if (file_exists($old_db_file)) {
+            unlink($old_db_file);
         }
 
         // Ensure the database file has the correct permissions
@@ -105,6 +136,8 @@ class admin_compass {
 
         set_transient( 'admin_compass_reindex_admin_menu', true);
         $this->rebuild_index();
+
+        update_option('admin_compass_version', ADMIN_COMPASS_VERSION);
     }
 
     public function deactivate() {
@@ -141,7 +174,7 @@ class admin_compass {
     }
 
     public function rebuild_index() {
-        $this->db->exec("DELETE FROM search_index WHERE item_type != 'admin_page'");
+        $this->db->exec("DELETE FROM search_index WHERE item_type != 'settings'");
 
         // Index posts and pages
         $posts = get_posts(array(
@@ -162,29 +195,41 @@ class admin_compass {
         }
     }
 
+    public function clean_admin_menu_title($title) {
+        $title = preg_replace('/[0-9]+/', '', $title);
+
+        $comments = __( 'Comments' );
+
+        if (strpos($title, $comments) === 0) {
+            return $comments;
+        }
+
+        return $title;
+    }
+
     public function admin_menu() {
         global $menu, $submenu;
 
-        if (get_transient( 'admin_compass_reindex_admin_menu') !== "1") {
+        if (get_transient( 'admin_compass_reindex_admin_menu') !== "1" || $this->db === false) {
             return;
         }
 
         delete_transient('admin_compass_reindex_admin_menu');
 
-        $this->db->exec("DELETE FROM search_index WHERE item_type = 'admin_page'");
+        $this->db->exec("DELETE FROM search_index WHERE item_type = 'settings'");
         foreach ($menu as $menu_item) {
             if (empty($menu_item[0])) continue;
 
-            $menu_title = wp_strip_all_tags($menu_item[0]);
+            $menu_title = $this->clean_admin_menu_title(wp_strip_all_tags($menu_item[0]));
             $menu_url = $menu_item[2];
 
             // Index main menu item
-            $this->add_to_index(0, 'admin_page', $menu_title, "Navigate to $menu_title admin page", admin_url($menu_url), null);
+            $this->add_to_index(0, 'settings', $menu_title, "Navigate to $menu_title admin page", admin_url($menu_url), null);
 
             // Index submenu items
             if (isset($submenu[$menu_url])) {
                 foreach ($submenu[$menu_url] as $submenu_item) {
-                    $submenu_title = wp_strip_all_tags($submenu_item[0]);
+                    $submenu_title = $this->clean_admin_menu_title(wp_strip_all_tags($submenu_item[0]));
                     $submenu_url = $submenu_item[2];
 
                     // Check if it's a custom plugin page
@@ -192,13 +237,17 @@ class admin_compass {
                         $submenu_url = $menu_url . '?page=' . $submenu_url;
                     }
 
-                    $this->add_to_index(0, 'admin_page', "$menu_title - $submenu_title", "Navigate to $submenu_title under $menu_title", admin_url($submenu_url), null);
+                    $this->add_to_index(0, 'settings', "$menu_title - $submenu_title", "Navigate to $submenu_title under $menu_title", admin_url($submenu_url), null);
                 }
             }
         }
     }
 
     private function add_to_index($item_id, $item_type, $title, $content, $edit_url, $thumbnail_url) {
+        if ($this->db === false) {
+            return;
+        }
+
         $stmt = $this->db->prepare("INSERT INTO search_index (item_id, item_type, title, content, edit_url, thumbnail_url) VALUES (:item_id, :item_type, :title, :content, :edit_url, :thumbnail_url)");
         $stmt->bindValue(':item_id', $item_id, SQLITE3_INTEGER);
         $stmt->bindValue(':item_type', $item_type, SQLITE3_TEXT);
@@ -242,12 +291,14 @@ class admin_compass {
             return;
         }
         ?>
-        <div id="admin-compass-modal" style="display:none;">
-            <div class="admin-compass-container">
-                <form autocomplete="off">
-                    <input type="text" id="admin-compass-input" placeholder="Search with Admin Compass..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
-                </form>
-                <div id="admin-compass-results"></div>
+        <div id="admin-compass-overlay" class="admin-compass-hidden">
+            <div id="admin-compass-modal" class="admin-compass-hidden">
+                <div class="admin-compass-container">
+                    <form autocomplete="off">
+                        <input type="text" id="admin-compass-input" placeholder="Search with Admin Compass..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+                    </form>
+                    <div id="admin-compass-results"></div>
+                </div>
             </div>
         </div>
         <?php
@@ -260,8 +311,8 @@ class admin_compass {
 
         wp_enqueue_style('dashicons');
         wp_enqueue_script('jquery');
-        wp_enqueue_script('admin-compass', plugins_url('admin-compass.js', __FILE__), array('jquery'), '3.4', true);
-        wp_enqueue_style('admin-compass', plugins_url('admin-compass.css', __FILE__), array(), '3.4');
+        wp_enqueue_script('admin-compass', plugins_url('admin-compass.js', __FILE__), array('jquery'), ADMIN_COMPASS_VERSION, true);
+        wp_enqueue_style('admin-compass', plugins_url('admin-compass.css', __FILE__), array(), ADMIN_COMPASS_VERSION);
 
         wp_localize_script('admin-compass', 'adminCompass', array(
             'ajaxurl' => admin_url('admin-ajax.php'),
@@ -296,6 +347,11 @@ class admin_compass {
                 END
             LIMIT 15
         ");
+
+        if ($search_query === false) {
+            wp_send_json_success([]);
+        }
+
         $search_query->bindValue(':query', '%' . $query . '%', SQLITE3_TEXT);
         $result = $search_query->execute();
 
@@ -423,6 +479,4 @@ class admin_compass {
 }
 
 $admin_compass = new admin_compass();
-
-
-
+$admin_compass->update();
