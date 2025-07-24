@@ -6,6 +6,8 @@ jQuery(document).ready(function($) {
     var currentFocus = -1;
     var currentRequest = null;
     var searchTimer = null;
+    var searchCache = {};
+    var recentItems = JSON.parse(localStorage.getItem('adminCompassRecent') || '[]');
 
     $(".admin-compass-icon").on("click", function(e) {
         e.preventDefault();
@@ -42,6 +44,7 @@ jQuery(document).ready(function($) {
         $modal.toggleClass('admin-compass-hidden');
         if (!$modal.hasClass('admin-compass-hidden')) {
             $input.focus();
+            showRecentItems();
         }
     }
 
@@ -65,16 +68,24 @@ jQuery(document).ready(function($) {
         }
 
         if (query.length < 2) {
-            $results.empty();
+            showRecentItems();
             return;
         }
 
         searchTimer = setTimeout(function() {
+            showLoading();
             performSearch(query);
-        }, 300);
+        }, 150);
     });
 
     function performSearch(query) {
+        // Check cache first
+        if (searchCache[query]) {
+            displayResults(searchCache[query]);
+            currentFocus = -1;
+            return;
+        }
+
         currentRequest = $.ajax({
             url: adminCompass.ajaxurl,
             method: "POST",
@@ -83,13 +94,10 @@ jQuery(document).ready(function($) {
                 nonce: adminCompass.nonce,
                 query: query
             },
-            beforeSend: function() {
-                if (currentRequest != null) {
-                    currentRequest.abort();
-                }
-            },
             success: function(response) {
                 if (response.success) {
+                    // Cache the results
+                    searchCache[query] = response.data;
                     displayResults(response.data);
                     currentFocus = -1;
                 }
@@ -124,25 +132,11 @@ jQuery(document).ready(function($) {
         if (currentFocus >= $items.length) currentFocus = 0;
         if (currentFocus < 0) currentFocus = ($items.length - 1);
         $items.eq(currentFocus).addClass("active");
-        scrollResultIntoView($items.eq(currentFocus));
+        $items.eq(currentFocus).get(0).scrollIntoView({ block: 'nearest' });
     }
 
     function removeActive($items) {
         $items.removeClass("active");
-    }
-
-    function scrollResultIntoView($item) {
-        var container = $results[0];
-        var item = $item[0];
-        if (item.offsetTop < container.scrollTop) {
-            container.scrollTop = item.offsetTop;
-        } else {
-            const offsetBottom = item.offsetTop + item.offsetHeight;
-            const scrollBottom = container.scrollTop + container.offsetHeight;
-            if (offsetBottom > scrollBottom) {
-                container.scrollTop = offsetBottom - container.offsetHeight;
-            }
-        }
     }
 
     function displayResults(items) {
@@ -153,24 +147,136 @@ jQuery(document).ready(function($) {
         }
 
         items.forEach(function(item, index) {
-             var resultItem = $("<div class='result-item'>")
-                .append($("<span class='result-title'>" + item.title + "</span>"))
-                .append($("<span class='result-type'>" + item.type + "</span>"));
+            // Get content type icon
+            var icon = getContentTypeIcon(item.type);
 
-            if (false && item.thumbnail_url) {
-                var thumbnailUrl = item.thumbnail_url || '/wp-includes/images/media/default.png';
-                resultItem.prepend($("<img class='result-thumbnail' src='" + thumbnailUrl + "' alt=''>"));
+            var quickActions = $("<div class='quick-actions'>");
+
+            // Always show edit/navigate button
+            quickActions.append($("<button class='quick-action edit' title='Edit'>✏️</button>")
+                .on("click", function(e) {
+                    e.stopPropagation();
+                    addToRecent(item);
+                    showNavigationLoading(item.title);
+                    window.location.href = item.edit_url;
+                })
+            );
+
+            // Only show view button for content that can be viewed (not settings)
+            if (item.type !== 'settings') {
+                quickActions.append($("<button class='quick-action view' title='View'>👁️</button>")
+                    .on("click", function(e) {
+                        e.stopPropagation();
+                        var viewUrl = getViewUrl(item);
+                        if (viewUrl) {
+                            window.open(viewUrl, '_blank');
+                        }
+                    })
+                );
             }
 
-            resultItem.on("click", function() {
-                window.location.href = item.edit_url;
-            }).on("mouseover", function() {
-                currentFocus = index;
-                addActive($results.find(".result-item"));
-            });
+            var resultItem = $("<div class='result-item'>")
+                .append($("<span class='result-icon'>").html(icon))
+                .append($("<div class='result-content'>")
+                    .append($("<div class='result-title'>").text(item.title))
+                    .append($("<div class='result-preview'>").text(item.preview || ''))
+                )
+                .append($("<span class='result-type'>").text(formatContentType(item.type)))
+                .append(quickActions)
+                .on("click", function() {
+                    addToRecent(item);
+                    showNavigationLoading(item.title);
+                    window.location.href = item.edit_url;
+                })
+                .on("mouseover", function() {
+                    currentFocus = index;
+                    addActive($results.find(".result-item"));
+                });
 
             $results.append(resultItem);
         });
+    }
+
+    function getContentTypeIcon(type) {
+        var icons = {
+            'post': '📝',
+            'page': '📄',
+            'product': '🛒',
+            'attachment': '📎',
+            'shop_order': '🛍️',
+            'settings': '⚙️'
+        };
+        return icons[type] || '📄';
+    }
+
+    function formatContentType(type) {
+        var types = {
+            'post': 'Post',
+            'page': 'Page',
+            'product': 'Product',
+            'attachment': 'Media',
+            'shop_order': 'Order',
+            'settings': 'Settings'
+        };
+        return types[type] || type.charAt(0).toUpperCase() + type.slice(1);
+    }
+
+    function showLoading() {
+        $results.html("<div class='loading-indicator'>🔍 Searching...</div>");
+    }
+
+    function getViewUrl(item) {
+        // This is simplified - in a real implementation, you'd need proper post URLs
+        if (item.type === 'settings') {
+            return null; // Settings pages don't have view URLs
+        }
+        // For now, just return the site URL + post ID for posts/pages
+        return window.location.origin + '/?p=' + item.id;
+    }
+
+    function addToRecent(item) {
+        // Remove if already exists
+        recentItems = recentItems.filter(function(recent) {
+            return recent.id !== item.id || recent.type !== item.type;
+        });
+
+        // Add to beginning
+        recentItems.unshift(item);
+
+        // Keep only last 10 items
+        recentItems = recentItems.slice(0, 10);
+
+        // Save to localStorage
+        localStorage.setItem('adminCompassRecent', JSON.stringify(recentItems));
+    }
+
+    function showRecentItems() {
+        if (recentItems.length === 0) {
+            $results.html("<div class='no-results'>Start typing to search...</div>");
+            return;
+        }
+
+        $results.html("<div class='recent-header'>Recent Items</div>");
+        displayResults(recentItems.slice(0, 5)); // Show only 5 most recent
+    }
+
+    function showNavigationLoading(title, action) {
+        action = action || 'Loading...';
+
+        // Replace the entire modal content with loading state
+        $results.html("<div class='navigation-loading'>" +
+            "<div class='loading-spinner'>⏳</div>" +
+            "<div class='loading-title'>" + action + "</div>" +
+            "<div class='loading-subtitle'>\"" + title + "\"</div>" +
+        "</div>");
+
+        // Hide the input
+        $input.prop('disabled', true).css('opacity', '0.5');
+
+        // Optional: Add slight delay to show the loading state
+        setTimeout(function() {
+            // This gives users visual feedback before page navigation
+        }, 100);
     }
 });
 jQuery(document).ready(function($) {

@@ -3,7 +3,7 @@
  * Plugin Name: Admin Compass
  * Plugin URI: https://wordpress.org/plugins/admin-compass/
  * Description: Global search for WP-Admin. The fastest way to navigate your backend.
- * Version: 1.2.0
+ * Version: 1.3.2
  * Author: Tag Concierge
  * Author URI: https://tagconcierge.com
  * Requires PHP: 7.4
@@ -19,22 +19,18 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
     require_once plugin_dir_path(__FILE__) . 'admin-compass-demo-setup.php';
 }
 
-define('ADMIN_COMPASS_VERSION', '1.1.1');
+define('ADMIN_COMPASS_VERSION', '1.3.2');
 
 class admin_compass {
-    public $db;
-    public $db_file;
-    public $db_name;
+    public $table_name;
 
     public function __construct() {
-        $this->init_db_name();
-        $this->db_file = $this->get_db_path();
-        $this->init_db();
+        global $wpdb;
+        $this->table_name = $wpdb->prefix . 'admin_compass_search_index';
 
         add_action('admin_bar_menu', array($this, 'add_search_icon'), 999);
         add_action('admin_footer', array($this, 'add_search_modal'));
         add_action('wp_footer', array($this, 'add_search_modal'));
-        add_action('admin_init', array($this, 'check_db_security'));
 
         add_action('admin_enqueue_scripts', array($this, 'enqueue_scripts'));
         add_action('wp_enqueue_scripts', array($this, 'enqueue_scripts'));
@@ -57,54 +53,17 @@ class admin_compass {
         register_deactivation_hook(__FILE__, array($this, 'deactivate'));
     }
 
-    private function init_db_name() {
-        $this->db_name = get_option('admin_compass_db_name');
-        if (!$this->db_name) {
-            $this->db_name = $this->generate_db_name();
-            update_option('admin_compass_db_name', $this->db_name);
-        }
-    }
-
-    private function generate_db_name() {
-        $random_string = bin2hex(random_bytes(16)); // 32 character random string
-        return 'admin_compass_' . $random_string . '.db';
-    }
-
-    private function get_db_path() {
-        // Store the database one level above the WordPress root
-        return WP_CONTENT_DIR . '/' . $this->db_name;
-    }
-
-    private function remove_db_file() {
-        if ($this->db) {
-            $this->db->close();
-            $this->db = null;
-        }
-
-        if (file_exists($this->db_file)) {
-            unlink($this->db_file);
-        }
-
-        if (file_exists($this->db_file . '-shm')) {
-            unlink($this->db_file . '-shm');
-        }
-        if (file_exists($this->db_file . '-wal')) {
-            unlink($this->db_file . '-wal');
-        }
-
-        // Remove the database name from options
-        delete_option('admin_compass_db_name');
+    private function drop_table() {
+        global $wpdb;
+        $wpdb->query("DROP TABLE IF EXISTS {$this->table_name}");
     }
 
     public function update() {
         $current_version = get_option('admin_compass_version', '0.0.0');
 
         if ($current_version !== '0.0.0' && version_compare($current_version, ADMIN_COMPASS_VERSION, '<')) {
-            // Remove the existing database file
-            $this->remove_db_file();
-
-            // Recreate the database and rebuild the index
-            $this->init_db();
+            // Drop and recreate the table for updates
+            $this->drop_table();
             $this->create_tables();
             $this->rebuild_index();
             set_transient( 'admin_compass_reindex_admin_menu', true);
@@ -122,16 +81,6 @@ class admin_compass {
     }
 
     public function activate() {
-        $old_db_file = WP_CONTENT_DIR . '/admin-compass.db';
-        if (file_exists($old_db_file)) {
-            unlink($old_db_file);
-        }
-
-        // Ensure the database file has the correct permissions
-        if (file_exists($this->db_file)) {
-            chmod($this->db_file, 0600);
-        }
-
         $this->create_tables();
 
         set_transient( 'admin_compass_reindex_admin_menu', true);
@@ -142,46 +91,43 @@ class admin_compass {
 
     public function deactivate() {
         wp_clear_scheduled_hook('admin_compass_rebuild_index');
-        $this->remove_db_file();
+        $this->drop_table();
     }
 
-    private function init_db() {
-        if (!class_exists('SQLite3')) {
-            add_action('admin_notices', function() {
-                echo '<div class="error"><p>Admin Compass requires SQLite3 PHP extension. Please install it and try again.</p></div>';
-            });
-            return;
-        }
-
-        $this->db = new SQLite3($this->db_file);
-        $this->db->exec('PRAGMA journal_mode = WAL;');
-    }
 
     private function create_tables() {
-        $this->db->exec("
-            CREATE TABLE IF NOT EXISTS search_index (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                item_id INTEGER,
-                item_type TEXT,
-                thumbnail_url TEXT,
-                title TEXT,
-                content TEXT,
-                edit_url TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_title ON search_index(title);
-            CREATE INDEX IF NOT EXISTS idx_content ON search_index(content);
-        ");
+        global $wpdb;
+
+        $charset_collate = $wpdb->get_charset_collate();
+
+        $sql = "CREATE TABLE {$this->table_name} (
+            id bigint(20) NOT NULL AUTO_INCREMENT,
+            item_id bigint(20) NOT NULL,
+            item_type varchar(50) NOT NULL,
+            thumbnail_url text,
+            title text NOT NULL,
+            content longtext,
+            edit_url text NOT NULL,
+            PRIMARY KEY (id),
+            KEY idx_title (title(191)),
+            KEY idx_content (content(191)),
+            KEY idx_item_type (item_type),
+            KEY idx_combined (title(191), content(191))
+        ) $charset_collate;";
+
+        require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+        dbDelta($sql);
     }
 
     public function rebuild_index() {
-        $this->db->exec("DELETE FROM search_index WHERE item_type != 'settings'");
+        global $wpdb;
+        $wpdb->query($wpdb->prepare("DELETE FROM {$this->table_name} WHERE item_type != %s", 'settings'));
 
         // Index posts and pages
         $posts = get_posts(array(
-            'post_type' => array('post', 'page', 'attachment'),
-            'posts_per_page' => 300,
-            'post_status' => null,
-            'post_parent' => null,
+            'post_type' => array('post', 'page', 'attachment', 'product'),
+            'posts_per_page' => -1,
+            'post_status' => array('publish', 'draft', 'private'),
         ));
 
         foreach ($posts as $post) {
@@ -191,7 +137,53 @@ class admin_compass {
                 $content .= ' ' . $post->post_title . ' ' . $post->post_name . ' ' . get_post_meta($post->ID, '_wp_attachment_image_alt', true);
             }
 
+            if ($post->post_type === 'product' && function_exists('wc_get_product')) {
+                $product = wc_get_product($post->ID);
+                if ($product) {
+                    $content .= ' ' . $product->get_sku() . ' ' . $product->get_price();
+                }
+            }
+
             $this->add_to_index($post->ID, $post->post_type, $post->post_title, $content, $this->get_edit_post_link($post, 'raw'), get_the_post_thumbnail_url($post));
+        }
+
+        // Index orders
+        if (class_exists('WC_Order_Query') && function_exists('wc_get_order')) {
+            $query = new WC_Order_Query(array(
+                'limit' => 100, // Limit to prevent timeouts
+                'return' => 'ids',
+            ));
+            $order_ids = $query->get_orders();
+
+            foreach ($order_ids as $order_id) {
+                $order = wc_get_order($order_id);
+                if ($order) {
+                    // Include comprehensive order data for search
+                    $customer_data = array(
+                        $order->get_billing_first_name(),
+                        $order->get_billing_last_name(),
+                        $order->get_billing_email(),
+                        $order->get_billing_phone(),
+                        $order->get_billing_company(),
+                        $order->get_shipping_first_name(),
+                        $order->get_shipping_last_name(),
+                        $order->get_shipping_company()
+                    );
+
+                    $content = sprintf(
+                        'Order #%s %s %s %s %s %s %s',
+                        $order->get_order_number(),
+                        $order->get_formatted_billing_full_name(),
+                        $order->get_billing_email(),
+                        $order->get_total(),
+                        $order->get_status(),
+                        $order->get_billing_phone(),
+                        implode(' ', array_filter($customer_data))
+                    );
+
+                    $this->add_to_index($order_id, 'shop_order', 'Order #' . $order->get_order_number(), $content, $this->get_edit_order_link($order_id), null);
+                }
+            }
         }
     }
 
@@ -210,13 +202,14 @@ class admin_compass {
     public function admin_menu() {
         global $menu, $submenu;
 
-        if (get_transient( 'admin_compass_reindex_admin_menu') !== "1" || $this->db === false) {
+        if (!get_transient( 'admin_compass_reindex_admin_menu')) {
             return;
         }
 
         delete_transient('admin_compass_reindex_admin_menu');
 
-        $this->db->exec("DELETE FROM search_index WHERE item_type = 'settings'");
+        global $wpdb;
+        $wpdb->delete($this->table_name, array('item_type' => 'settings'));
         foreach ($menu as $menu_item) {
             if (empty($menu_item[0])) continue;
 
@@ -244,19 +237,20 @@ class admin_compass {
     }
 
     private function add_to_index($item_id, $item_type, $title, $content, $edit_url, $thumbnail_url) {
-        if ($this->db === false) {
-            return;
-        }
+        global $wpdb;
 
-        $stmt = $this->db->prepare("INSERT INTO search_index (item_id, item_type, title, content, edit_url, thumbnail_url) VALUES (:item_id, :item_type, :title, :content, :edit_url, :thumbnail_url)");
-        $stmt->bindValue(':item_id', $item_id, SQLITE3_INTEGER);
-        $stmt->bindValue(':item_type', $item_type, SQLITE3_TEXT);
-        $stmt->bindValue(':title', $title, SQLITE3_TEXT);
-        $stmt->bindValue(':content', $content, SQLITE3_TEXT);
-        $stmt->bindValue(':edit_url', $edit_url, SQLITE3_TEXT);
-        $stmt->bindValue(':thumbnail_url', $thumbnail_url, SQLITE3_TEXT);
-
-        $stmt->execute();
+        $wpdb->insert(
+            $this->table_name,
+            array(
+                'item_id' => $item_id,
+                'item_type' => $item_type,
+                'title' => $title,
+                'content' => $content,
+                'edit_url' => $edit_url,
+                'thumbnail_url' => $thumbnail_url
+            ),
+            array('%d', '%s', '%s', '%s', '%s', '%s')
+        );
     }
 
     public function update_index_on_save($post_id, $post, $update) {
@@ -265,9 +259,8 @@ class admin_compass {
     }
 
     public function remove_from_index($item_id) {
-        $stmt = $this->db->prepare("DELETE FROM search_index WHERE item_id = :item_id");
-        $stmt->bindValue(':item_id', $item_id, SQLITE3_INTEGER);
-        $stmt->execute();
+        global $wpdb;
+        $wpdb->delete($this->table_name, array('item_id' => $item_id), array('%d'));
     }
 
     public function add_search_icon($wp_admin_bar) {
@@ -298,6 +291,13 @@ class admin_compass {
                         <input type="text" id="admin-compass-input" placeholder="Search with Admin Compass..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
                     </form>
                     <div id="admin-compass-results"></div>
+                    <div class="admin-compass-footer">
+                        <div class="keyboard-shortcuts">
+                            <span class="shortcut"><kbd>↑</kbd><kbd>↓</kbd> Navigate</span>
+                            <span class="shortcut"><kbd>↵</kbd> Select</span>
+                            <span class="shortcut"><kbd>Esc</kbd> Close</span>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -331,37 +331,44 @@ class admin_compass {
             return wp_send_json_success([]);
         }
         $query = sanitize_text_field(wp_unslash($_POST['query']));
-        $query = str_replace(' ', '%', $query);
-        $limit = 10;
 
         $results = array();
 
-        $search_query = $this->db->prepare("
-            SELECT item_id, item_type, title, edit_url, thumbnail_url
-            FROM search_index
-            WHERE title LIKE :query OR content LIKE :query
-            ORDER BY
-                CASE
-                    WHEN title LIKE :query THEN 1
-                    WHEN content LIKE :query THEN 2
-                END
-            LIMIT 15
-        ");
+        global $wpdb;
+        $search_term = '%' . $wpdb->esc_like($query) . '%';
 
-        if ($search_query === false) {
-            wp_send_json_success([]);
-        }
+        $results_data = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT item_id, item_type, title, edit_url, thumbnail_url, content
+                FROM {$this->table_name}
+                WHERE title LIKE %s OR content LIKE %s
+                ORDER BY title LIKE %s DESC, title
+                LIMIT 15",
+                $search_term,
+                $search_term,
+                $search_term
+            ),
+            ARRAY_A
+        );
 
-        $search_query->bindValue(':query', '%' . $query . '%', SQLITE3_TEXT);
-        $result = $search_query->execute();
+        foreach ($results_data as $row) {
+            // Generate preview excerpt
+            $preview = '';
+            if (!empty($row['content'])) {
+                $preview = wp_strip_all_tags($row['content']);
+                $preview = substr($preview, 0, 120);
+                if (strlen($row['content']) > 120) {
+                    $preview .= '...';
+                }
+            }
 
-        while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
             $results[] = array(
                 'id' => $row['item_id'],
                 'title' => $row['title'],
                 'type' => $row['item_type'],
                 'edit_url' => $row['edit_url'],
                 'thumbnail_url' => $row['thumbnail_url'],
+                'preview' => $preview,
             );
         }
 
@@ -437,45 +444,13 @@ class admin_compass {
         return apply_filters( 'get_edit_post_link', $link, $post->ID, $context );
     }
 
-    public function check_db_security() {
-        // Check file permissions
-        if (file_exists($this->db_file)) {
-            $perms = fileperms($this->db_file);
-            if (($perms & 0777) !== 0600) {
-                chmod($this->db_file, 0600);
-                add_action('admin_notices', function() {
-                    echo '<div class="warning"><p>Admin Compass: The database file permissions have been corrected to 0600.</p></div>';
-                });
-            }
+    function get_edit_order_link($order_id) {
+        if (!function_exists('wc_get_order')) {
+            return admin_url('edit.php?post_type=shop_order');
         }
-
-        $this->create_htaccess();
-
-        $this->check_db_accessibility();
+        return admin_url('post.php?post=' . $order_id . '&action=edit');
     }
 
-     private function create_htaccess() {
-        $htaccess_file = dirname($this->db_file) . '/.htaccess';
-        if (!file_exists($htaccess_file)) {
-            $htaccess_content = "<FilesMatch \"\\.(db)$\">
-    Order allow,deny
-    Deny from all
-</FilesMatch>
-";
-            file_put_contents($htaccess_file, $htaccess_content);
-        }
-    }
-
-    private function check_db_accessibility() {
-        $db_url = str_replace(ABSPATH, get_site_url() . '/', $this->db_file);
-        $response = wp_remote_head($db_url);
-
-        if (!is_wp_error($response) && $response['response']['code'] !== 403) {
-            add_action('admin_notices', function() {
-                echo '<div class="error"><p>Warning: Your Admin Compass database file may be publicly accessible. Please check your server configuration.</p></div>';
-            });
-        }
-    }
 }
 
 $admin_compass = new admin_compass();
