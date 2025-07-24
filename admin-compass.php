@@ -3,7 +3,7 @@
  * Plugin Name: Admin Compass
  * Plugin URI: https://wordpress.org/plugins/admin-compass/
  * Description: Global search for WP-Admin. The fastest way to navigate your backend.
- * Version: 1.3.2
+ * Version: 1.3.0
  * Author: Tag Concierge
  * Author URI: https://tagconcierge.com
  * Requires PHP: 7.4
