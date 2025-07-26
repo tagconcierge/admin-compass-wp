@@ -1,5 +1,5 @@
 jQuery(document).ready(function($) {
-     var $overlay = $("#admin-compass-overlay");
+    var $overlay = $("#admin-compass-overlay");
     var $modal = $("#admin-compass-modal");
     var $input = $("#admin-compass-input");
     var $results = $("#admin-compass-results");
@@ -8,6 +8,7 @@ jQuery(document).ready(function($) {
     var searchTimer = null;
     var searchCache = {};
     var recentItems = JSON.parse(localStorage.getItem('adminCompassRecent') || '[]');
+    var indexingCheckInterval = null;
 
     $(".admin-compass-icon").on("click", function(e) {
         e.preventDefault();
@@ -15,7 +16,13 @@ jQuery(document).ready(function($) {
     });
 
     $(document).on("keydown", function(e) {
-        if (e.ctrlKey && e.shiftKey && e.which === 70) {
+        // Ctrl+K or Cmd+K
+        if ((e.ctrlKey || e.metaKey) && e.which === 75) {
+            e.preventDefault();
+            toggleModal();
+        }
+        // Also keep Ctrl+Shift+F for backwards compatibility
+        else if (e.ctrlKey && e.shiftKey && e.which === 70) {
             e.preventDefault();
             toggleModal();
         }
@@ -45,6 +52,15 @@ jQuery(document).ready(function($) {
         if (!$modal.hasClass('admin-compass-hidden')) {
             $input.focus();
             showRecentItems();
+            checkIndexingStatus();
+            // Check indexing status periodically while modal is open
+            indexingCheckInterval = setInterval(checkIndexingStatus, 5000);
+        } else {
+            // Clear interval when modal is closed
+            if (indexingCheckInterval) {
+                clearInterval(indexingCheckInterval);
+                indexingCheckInterval = null;
+            }
         }
     }
 
@@ -54,6 +70,11 @@ jQuery(document).ready(function($) {
         $input.val("");
         $results.empty();
         currentFocus = -1;
+        // Clear interval when modal is closed
+        if (indexingCheckInterval) {
+            clearInterval(indexingCheckInterval);
+            indexingCheckInterval = null;
+        }
     }
 
     $input.on("input", function() {
@@ -78,6 +99,46 @@ jQuery(document).ready(function($) {
         }, 150);
     });
 
+    function checkIndexingStatus() {
+        $.ajax({
+            url: adminCompass.ajaxurl,
+            type: 'POST',
+            data: {
+                action: 'admin_compass_check_indexing',
+                nonce: adminCompass.nonce
+            },
+            success: function(response) {
+                if (response.success && response.data.is_indexing) {
+                    showIndexingNotice(response.data.elapsed_time);
+                } else {
+                    hideIndexingNotice();
+                }
+            }
+        });
+    }
+    
+    function showIndexingNotice(elapsedTime) {
+        var minutes = Math.floor(elapsedTime / 60);
+        var seconds = elapsedTime % 60;
+        var timeText = minutes > 0 ? minutes + 'm ' + seconds + 's' : seconds + 's';
+        
+        var $notice = $('#admin-compass-indexing-notice');
+        if ($notice.length === 0) {
+            $notice = $('<div id="admin-compass-indexing-notice" class="admin-compass-indexing-notice">' +
+                '<span class="spinner"></span>' +
+                '<span class="text">Search index is being rebuilt... (' + timeText + ')</span>' +
+                '<div class="subtext">Search results may be incomplete</div>' +
+                '</div>');
+            $('.admin-compass-container').prepend($notice);
+        } else {
+            $notice.find('.text').text('Search index is being rebuilt... (' + timeText + ')');
+        }
+    }
+    
+    function hideIndexingNotice() {
+        $('#admin-compass-indexing-notice').remove();
+    }
+    
     function performSearch(query) {
         // Check cache first
         if (searchCache[query]) {
@@ -162,8 +223,8 @@ jQuery(document).ready(function($) {
                 })
             );
 
-            // Only show view button for content that can be viewed (not settings)
-            if (item.type !== 'settings') {
+            // Only show view button for content that can be viewed (not settings or orders)
+            if (item.type !== 'settings' && item.type !== 'shop_order') {
                 quickActions.append($("<button class='quick-action view' title='View'>👁️</button>")
                     .on("click", function(e) {
                         e.stopPropagation();

@@ -3,9 +3,9 @@
  * Plugin Name: Admin Compass
  * Plugin URI: https://wordpress.org/plugins/admin-compass/
  * Description: Global search for WP-Admin. The fastest way to navigate your backend.
- * Version: 1.3.0
- * Author: Tag Concierge
- * Author URI: https://tagconcierge.com
+ * Version: 1.3.1
+ * Author: Tag Pilot
+ * Author URI: https://tagpilot.io
  * Requires PHP: 7.4
  * License:     GPLv2 or later
  * License URI: http://www.gnu.org/licenses/gpl-2.0.html
@@ -14,12 +14,7 @@
 
 if (!defined('ABSPATH')) exit; // Exit if accessed directly
 
-if ( defined( 'WP_CLI' ) && WP_CLI ) {
-    require_once plugin_dir_path( __FILE__ ) . 'admin-compass-load-test.php';
-    require_once plugin_dir_path(__FILE__) . 'admin-compass-demo-setup.php';
-}
-
-define('ADMIN_COMPASS_VERSION', '1.3.2');
+define('ADMIN_COMPASS_VERSION', '1.3.1');
 
 class admin_compass {
     public $table_name;
@@ -39,6 +34,7 @@ class admin_compass {
         add_action('delete_post', array($this, 'remove_from_index'));
         add_action('wp_ajax_admin_compass_search', array($this, 'admin_compass_ajax_handler'));
         add_action('wp_ajax_nopriv_admin_compass_search', array($this, 'admin_compass_ajax_handler'));
+        add_action('wp_ajax_admin_compass_check_indexing', array($this, 'check_indexing_status'));
         add_filter('plugin_row_meta', array($this, 'add_plugin_meta_links'), 10, 4);
         add_action('wp_ajax_admin_compass_reindex', array($this, 'schedule_background_job'));
         add_action('admin_menu', array($this, 'admin_menu'));
@@ -91,7 +87,9 @@ class admin_compass {
 
     public function deactivate() {
         wp_clear_scheduled_hook('admin_compass_rebuild_index');
-        $this->drop_table();
+        // Clear indexing state if deactivated during indexing
+        delete_option('admin_compass_indexing_in_progress');
+        delete_option('admin_compass_indexing_started');
     }
 
 
@@ -108,11 +106,16 @@ class admin_compass {
             title text NOT NULL,
             content longtext,
             edit_url text NOT NULL,
+            date_modified datetime DEFAULT NULL,
+            date_created datetime DEFAULT NULL,
             PRIMARY KEY (id),
             KEY idx_title (title(191)),
             KEY idx_content (content(191)),
             KEY idx_item_type (item_type),
-            KEY idx_combined (title(191), content(191))
+            KEY idx_combined (title(191), content(191)),
+            KEY idx_date_modified (date_modified),
+            KEY idx_date_created (date_created),
+            UNIQUE KEY idx_item_unique (item_id, item_type)
         ) $charset_collate;";
 
         require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
@@ -120,17 +123,34 @@ class admin_compass {
     }
 
     public function rebuild_index() {
+        // Set indexing state
+        update_option('admin_compass_indexing_in_progress', true);
+        update_option('admin_compass_indexing_started', time());
+
         global $wpdb;
         $wpdb->query($wpdb->prepare("DELETE FROM {$this->table_name} WHERE item_type != %s", 'settings'));
 
-        // Index posts and pages
-        $posts = get_posts(array(
-            'post_type' => array('post', 'page', 'attachment', 'product'),
-            'posts_per_page' => -1,
-            'post_status' => array('publish', 'draft', 'private'),
-        ));
+        // Index posts and pages in batches
+        $post_types = array('post', 'page', 'attachment', 'product');
+        $batch_size = 100;
+        $total_indexed = 0;
 
-        foreach ($posts as $post) {
+        foreach ($post_types as $post_type) {
+            $offset = 0;
+
+            do {
+                $posts = get_posts(array(
+                    'post_type' => $post_type,
+                    'posts_per_page' => $batch_size,
+                    'offset' => $offset,
+                    'post_status' => array('publish', 'draft', 'private'),
+                ));
+
+                if (empty($posts)) {
+                    break;
+                }
+
+                foreach ($posts as $post) {
 
             $content = $post->post_content;
             if ($post->post_type === 'attachment') {
@@ -144,20 +164,60 @@ class admin_compass {
                 }
             }
 
-            $this->add_to_index($post->ID, $post->post_type, $post->post_title, $content, $this->get_edit_post_link($post, 'raw'), get_the_post_thumbnail_url($post));
+                    $edit_url = $this->get_edit_post_link($post, 'raw');
+                    if (!$edit_url) {
+                        $edit_url = admin_url('post.php?post=' . $post->ID . '&action=edit');
+                    }
+                    $this->add_to_index($post->ID, $post->post_type, $post->post_title, $content, $edit_url, get_the_post_thumbnail_url($post), $post->post_modified, $post->post_date, true);
+                    $total_indexed++;
+                }
+
+                $offset += $batch_size;
+
+                // Prevent timeout
+                if (connection_status() != CONNECTION_NORMAL) {
+                    break 2;
+                }
+
+            } while (count($posts) == $batch_size);
         }
 
-        // Index orders
+        // Index orders in batches
         if (class_exists('WC_Order_Query') && function_exists('wc_get_order')) {
-            $query = new WC_Order_Query(array(
-                'limit' => 100, // Limit to prevent timeouts
-                'return' => 'ids',
-            ));
-            $order_ids = $query->get_orders();
+            $batch_size = 50; // Smaller batch for orders as they're more complex
+            $offset = 0;
+            $processed_ids = array(); // Track processed IDs to avoid duplicates
 
-            foreach ($order_ids as $order_id) {
-                $order = wc_get_order($order_id);
-                if ($order) {
+            do {
+                $query = new WC_Order_Query(array(
+                    'limit' => $batch_size,
+                    'offset' => $offset,
+                    'return' => 'ids',
+                    'type' => 'shop_order', // Exclude refunds from the query
+                    'orderby' => 'ID',
+                    'order' => 'ASC',
+                    'paginate' => false
+                ));
+                $order_ids = $query->get_orders();
+
+                if (empty($order_ids)) {
+                    break;
+                }
+
+                foreach ($order_ids as $order_id) {
+                    // Skip if already processed in this batch run
+                    if (in_array($order_id, $processed_ids)) {
+                        continue;
+                    }
+                    $processed_ids[] = $order_id;
+
+                    $order = wc_get_order($order_id);
+                    if ($order) {
+                        // Skip refunds as they don't have billing/shipping methods
+                        if ($order->get_type() === 'shop_order_refund') {
+                            continue;
+                        }
+
                     // Include comprehensive order data for search
                     $customer_data = array(
                         $order->get_billing_first_name(),
@@ -181,10 +241,23 @@ class admin_compass {
                         implode(' ', array_filter($customer_data))
                     );
 
-                    $this->add_to_index($order_id, 'shop_order', 'Order #' . $order->get_order_number(), $content, $this->get_edit_order_link($order_id), null);
+                    $this->add_to_index($order_id, 'shop_order', 'Order #' . $order->get_order_number(), $content, $this->get_edit_order_link($order_id), null, $order->get_date_modified()->format('Y-m-d H:i:s'), $order->get_date_created()->format('Y-m-d H:i:s'), true);
+                    }
                 }
-            }
+
+                $offset += $batch_size;
+
+                // Prevent timeout
+                if (connection_status() != CONNECTION_NORMAL) {
+                    break;
+                }
+
+            } while (count($order_ids) == $batch_size);
         }
+
+        // Clear indexing state
+        delete_option('admin_compass_indexing_in_progress');
+        delete_option('admin_compass_indexing_started');
     }
 
     public function clean_admin_menu_title($title) {
@@ -217,7 +290,7 @@ class admin_compass {
             $menu_url = $menu_item[2];
 
             // Index main menu item
-            $this->add_to_index(0, 'settings', $menu_title, "Navigate to $menu_title admin page", admin_url($menu_url), null);
+            $this->add_to_index(0, 'settings', $menu_title, "Navigate to $menu_title admin page", admin_url($menu_url), null, null, null, true);
 
             // Index submenu items
             if (isset($submenu[$menu_url])) {
@@ -230,32 +303,63 @@ class admin_compass {
                         $submenu_url = $menu_url . '?page=' . $submenu_url;
                     }
 
-                    $this->add_to_index(0, 'settings', "$menu_title - $submenu_title", "Navigate to $submenu_title under $menu_title", admin_url($submenu_url), null);
+                    $this->add_to_index(0, 'settings', "$menu_title - $submenu_title", "Navigate to $submenu_title under $menu_title", admin_url($submenu_url), null, null, null, true);
                 }
             }
         }
     }
 
-    private function add_to_index($item_id, $item_type, $title, $content, $edit_url, $thumbnail_url) {
+    private function add_to_index($item_id, $item_type, $title, $content, $edit_url, $thumbnail_url, $date_modified = null, $date_created = null, $force_insert = false) {
         global $wpdb;
 
-        $wpdb->insert(
-            $this->table_name,
-            array(
-                'item_id' => $item_id,
-                'item_type' => $item_type,
-                'title' => $title,
-                'content' => $content,
-                'edit_url' => $edit_url,
-                'thumbnail_url' => $thumbnail_url
-            ),
-            array('%d', '%s', '%s', '%s', '%s', '%s')
-        );
+        if ($force_insert) {
+            // Force insert during rebuild (we already deleted old entries)
+            $wpdb->insert(
+                $this->table_name,
+                array(
+                    'item_id' => $item_id,
+                    'item_type' => $item_type,
+                    'title' => $title,
+                    'content' => $content,
+                    'edit_url' => $edit_url,
+                    'thumbnail_url' => $thumbnail_url,
+                    'date_modified' => $date_modified,
+                    'date_created' => $date_created
+                ),
+                array('%d', '%s', '%s', '%s', '%s', '%s', '%s', '%s')
+            );
+        } else {
+            // Use INSERT ... ON DUPLICATE KEY UPDATE for better performance
+            $wpdb->query($wpdb->prepare(
+                "INSERT INTO {$this->table_name}
+                (item_id, item_type, title, content, edit_url, thumbnail_url, date_modified, date_created)
+                VALUES (%d, %s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                title = VALUES(title),
+                content = VALUES(content),
+                edit_url = VALUES(edit_url),
+                thumbnail_url = VALUES(thumbnail_url),
+                date_modified = VALUES(date_modified),
+                date_created = VALUES(date_created)",
+                $item_id,
+                $item_type,
+                $title,
+                $content,
+                $edit_url,
+                $thumbnail_url,
+                $date_modified,
+                $date_created
+            ));
+        }
     }
 
     public function update_index_on_save($post_id, $post, $update) {
         $this->remove_from_index($post_id);
-        $this->add_to_index($post_id, $post->post_type, $post->post_title, $post->post_content, $this->get_edit_post_link($post, 'raw'), get_the_post_thumbnail_url($post));
+        $edit_url = $this->get_edit_post_link($post, 'raw');
+        if (!$edit_url) {
+            $edit_url = admin_url('post.php?post=' . $post_id . '&action=edit');
+        }
+        $this->add_to_index($post_id, $post->post_type, $post->post_title, $post->post_content, $edit_url, get_the_post_thumbnail_url($post), $post->post_modified, $post->post_date);
     }
 
     public function remove_from_index($item_id) {
@@ -273,7 +377,7 @@ class admin_compass {
             'title' => '<span class="ab-icon dashicons dashicons-search"></span>',
             'href'  => '#',
             'meta'  => array(
-                'title' => 'Admin Compass Search (Ctrl + Shift + F)',
+                'title' => 'Admin Compass Search (Ctrl+K or Cmd+K)',
                 'class' => 'admin-compass-icon'
             ),
         ));
@@ -339,14 +443,20 @@ class admin_compass {
 
         $results_data = $wpdb->get_results(
             $wpdb->prepare(
-                "SELECT item_id, item_type, title, edit_url, thumbnail_url, content
+                "SELECT item_id, item_type, title, edit_url, thumbnail_url, content, date_modified, date_created
                 FROM {$this->table_name}
                 WHERE title LIKE %s OR content LIKE %s
-                ORDER BY title LIKE %s DESC, title
+                ORDER BY
+                    CASE
+                        WHEN title LIKE %s THEN 1
+                        ELSE 2
+                    END,
+                    COALESCE(date_modified, date_created) DESC,
+                    title
                 LIMIT 15",
                 $search_term,
                 $search_term,
-                $search_term
+                '%' . $wpdb->esc_like($query) . '%'
             ),
             ARRAY_A
         );
@@ -397,6 +507,21 @@ class admin_compass {
         wp_schedule_single_event(time(), 'admin_compass_rebuild_index');
 
         wp_send_json_success('Background job scheduled');
+    }
+
+    public function check_indexing_status() {
+        check_ajax_referer('admin_compass_nonce', 'nonce');
+
+        $is_indexing = get_option('admin_compass_indexing_in_progress', false);
+        $indexing_started = get_option('admin_compass_indexing_started', 0);
+
+        $response = array(
+            'is_indexing' => $is_indexing,
+            'started_at' => $indexing_started,
+            'elapsed_time' => $is_indexing ? (time() - $indexing_started) : 0
+        );
+
+        wp_send_json_success($response);
     }
 
     function get_edit_post_link( $post = 0, $context = 'display' ) {
