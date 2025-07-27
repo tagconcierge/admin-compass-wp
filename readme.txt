@@ -15,6 +15,8 @@ Admin Compass provides fast, global search functionality for your WordPress admi
 
 Admin Compass improves how you navigate your WordPress WP-Admin Dashboard. With a simple interface inspired by MacOS tools like Raycast or Alfred, it offers fast search capabilities, allowing you to quickly find and access posts, pages, products, settings, and more.
 
+https://www.youtube.com/watch?v=A3zLyRVEFMo
+
 **This is open beta which means some features still need testing, see FAQ for more details.**
 
 Key Features:
@@ -78,5 +80,3 @@ While the plugin should work on individual sites within a multisite installation
 == Screenshots ==
 
 1. Admin Compass search palette WooCommerce products
-
-2. Admin Compass search palette in action
