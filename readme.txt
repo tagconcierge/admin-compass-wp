@@ -44,6 +44,10 @@ This is currently an open beta, ready for testing. It doesn't perform any destru
 
 You can open the search palette by using the keyboard shortcut Ctrl + Shift + F, or by clicking the "magnifying glass" icon in the WordPress admin top-bar.
 
+= Why not the built-in WordPress Command Palette =
+
+I know there is already a command palette built into the WordPress editor ([link](https://wordpress.org/documentation/article/site-editor-command-palette/)). The problem is that it's only available when editing posts or pages with default WordPress editor, so it's not global. Also it seems the development stopped.
+
 = Can I change the keyboard shortcut? =
 
 Currently, the keyboard shortcut is not customizable, but we're planning to add this feature in a future update.
