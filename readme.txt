@@ -77,5 +77,6 @@ While the plugin should work on individual sites within a multisite installation
 
 == Screenshots ==
 
-1. Admin Compass search palette in action
+1. Admin Compass search palette WooCommerce products
 
+2. Admin Compass search palette in action
